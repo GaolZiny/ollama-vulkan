@@ -119,6 +119,7 @@ jobs:
               # === Track build stage for version injection + strip mlx ===
               if line.startswith('FROM') and 'AS build' in line:
                   in_build_stage = True
+                  skip = False
                   output.append(line)
                   i += 1
                   continue
