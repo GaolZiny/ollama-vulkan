@@ -22,10 +22,17 @@ jobs:
     steps:
       - name: Get Latest Version
         id: get_latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=$(curl -s https://api.github.com/repos/ollama/ollama/releases/latest | jq -r '.tag_name')
+          VERSION=$(curl -sf -H "Authorization: token ${GH_TOKEN}" \
+            https://api.github.com/repos/ollama/ollama/releases/latest | jq -r '.tag_name')
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "Failed to get latest version"
+            exit 1
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "📦 最新版本: $VERSION"
+          echo "Latest version: $VERSION"
 
       - name: Check Current Version
         id: get_current
