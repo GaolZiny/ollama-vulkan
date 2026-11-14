@@ -36,5 +36,6 @@ git merge upstream/main
 
 ## 注意
 
-- GitHub 会在仓库 60 天无提交后自动停用定时 workflow，需要到 Actions 页面重新 Enable。
+- GitHub 会在仓库 60 天无提交后自动停用定时 workflow；自动构建里的 `keepalive` job 每次运行都会通过 API 重新启用自己。如果已经被停用，需要到 Actions 页面手动 Enable 一次。
+- 上游 Dockerfile 结构变化时构建会直接失败，GitHub 会发邮件通知；届时需要更新 `patch_dockerfile.py`。
 - 上游官方镜像 `ollama/ollama` 现已内置 Vulkan 且默认启用；本镜像的优势是体积小（不含 CUDA/ROCm）。

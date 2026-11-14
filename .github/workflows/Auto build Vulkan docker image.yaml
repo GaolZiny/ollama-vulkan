@@ -14,6 +14,21 @@ on:
         default: false
 
 jobs:
+  keepalive:
+    # GitHub disables scheduled workflows after 60 days without repo activity.
+    # This fork rarely gets commits, so re-enable ourselves on every run.
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Re-enable this workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          WF_ID=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq '.workflow_id')
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/${WF_ID}/enable"
+          echo "Workflow ${WF_ID} keepalive OK"
+
   check-version:
     runs-on: ubuntu-latest
     permissions:
