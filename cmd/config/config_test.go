@@ -3,22 +3,99 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/ollama/ollama/internal/onboarding"
 )
 
 // setTestHome sets both HOME (Unix) and USERPROFILE (Windows) for cross-platform tests
 func setTestHome(t *testing.T, dir string) {
 	t.Setenv("HOME", dir)
+	t.Setenv("TMPDIR", dir)
 	t.Setenv("USERPROFILE", dir)
 }
 
-// editorPaths is a test helper that safely calls Paths if the runner implements Editor
-func editorPaths(r Runner) []string {
-	if editor, ok := r.(Editor); ok {
-		return editor.Paths()
+func TestWelcomeStorage(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	if err := CompleteWelcome(); err != nil {
+		t.Fatal(err)
 	}
-	return nil
+	cfg, err := load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	linux := runtime.GOOS == "linux"
+	if (cfg.OnboardingVersion == onboarding.CurrentVersion) != linux {
+		t.Fatalf("unexpected config completion on %s: %d", runtime.GOOS, cfg.OnboardingVersion)
+	}
+	if marked, err := (onboarding.State{}).Completed(); err != nil || marked == linux {
+		t.Fatalf("unexpected marker on %s: completed=%v err=%v", runtime.GOOS, marked, err)
+	}
+}
+
+func TestWelcomeInConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version int
+	}{
+		{name: "unfinished"},
+		{name: "completed", version: onboarding.CurrentVersion},
+		{name: "newer version", version: onboarding.CurrentVersion + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setTestHome(t, t.TempDir())
+			if needed, err := needsWelcomeInConfig(); err != nil || !needed {
+				t.Fatalf("fresh config: needed=%v err=%v", needed, err)
+			}
+			if err := save(&config{LastModel: "saved-model", OnboardingVersion: tc.version}); err != nil {
+				t.Fatal(err)
+			}
+			if needed, err := needsWelcomeInConfig(); err != nil || needed != (tc.version == 0) {
+				t.Fatalf("existing config: needed=%v err=%v", needed, err)
+			}
+			if err := completeWelcomeInConfig(); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := load(); err != nil || got.LastModel != "saved-model" || got.OnboardingVersion != max(tc.version, onboarding.CurrentVersion) {
+				t.Fatalf("completion changed preferences: %+v, %v", got, err)
+			}
+			if err := SetLastModel("new-model"); err != nil {
+				t.Fatal(err)
+			}
+			if needed, err := needsWelcomeInConfig(); err != nil || needed {
+				t.Fatalf("completion was lost: needed=%v err=%v", needed, err)
+			}
+			if marked, err := (onboarding.State{}).Completed(); err != nil || marked {
+				t.Fatalf("config completion changed marker: completed=%v err=%v", marked, err)
+			}
+		})
+	}
+}
+
+func TestWelcomeInConfigPreservesCorruptFile(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	path, err := configPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const contents = `{corrupt`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := needsWelcomeInConfig(); err == nil {
+		t.Fatal("expected config read error")
+	}
+	if err := completeWelcomeInConfig(); err == nil {
+		t.Fatal("expected completion to fail without overwriting config")
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != contents {
+		t.Fatalf("corrupt config was overwritten: %q, %v", got, err)
+	}
 }
 
 func TestIntegrationConfig(t *testing.T) {
@@ -27,11 +104,11 @@ func TestIntegrationConfig(t *testing.T) {
 
 	t.Run("save and load round-trip", func(t *testing.T) {
 		models := []string{"llama3.2", "mistral", "qwen2.5"}
-		if err := saveIntegration("claude", models); err != nil {
+		if err := SaveIntegration("claude", models); err != nil {
 			t.Fatal(err)
 		}
 
-		config, err := loadIntegration("claude")
+		config, err := LoadIntegration("claude")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -48,18 +125,18 @@ func TestIntegrationConfig(t *testing.T) {
 
 	t.Run("save and load aliases", func(t *testing.T) {
 		models := []string{"llama3.2"}
-		if err := saveIntegration("claude", models); err != nil {
+		if err := SaveIntegration("claude", models); err != nil {
 			t.Fatal(err)
 		}
 		aliases := map[string]string{
 			"primary": "llama3.2:70b",
 			"fast":    "llama3.2:8b",
 		}
-		if err := saveAliases("claude", aliases); err != nil {
+		if err := SaveAliases("claude", aliases); err != nil {
 			t.Fatal(err)
 		}
 
-		config, err := loadIntegration("claude")
+		config, err := LoadIntegration("claude")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -74,17 +151,17 @@ func TestIntegrationConfig(t *testing.T) {
 	})
 
 	t.Run("saveIntegration preserves aliases", func(t *testing.T) {
-		if err := saveIntegration("claude", []string{"model-a"}); err != nil {
+		if err := SaveIntegration("claude", []string{"model-a"}); err != nil {
 			t.Fatal(err)
 		}
-		if err := saveAliases("claude", map[string]string{"primary": "model-a", "fast": "model-small"}); err != nil {
+		if err := SaveAliases("claude", map[string]string{"primary": "model-a", "fast": "model-small"}); err != nil {
 			t.Fatal(err)
 		}
 
-		if err := saveIntegration("claude", []string{"model-b"}); err != nil {
+		if err := SaveIntegration("claude", []string{"model-b"}); err != nil {
 			t.Fatal(err)
 		}
-		config, err := loadIntegration("claude")
+		config, err := LoadIntegration("claude")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -94,9 +171,9 @@ func TestIntegrationConfig(t *testing.T) {
 	})
 
 	t.Run("defaultModel returns first model", func(t *testing.T) {
-		saveIntegration("codex", []string{"model-a", "model-b"})
+		SaveIntegration("codex", []string{"model-a", "model-b"})
 
-		config, _ := loadIntegration("codex")
+		config, _ := LoadIntegration("codex")
 		defaultModel := ""
 		if len(config.Models) > 0 {
 			defaultModel = config.Models[0]
@@ -118,9 +195,9 @@ func TestIntegrationConfig(t *testing.T) {
 	})
 
 	t.Run("app name is case-insensitive", func(t *testing.T) {
-		saveIntegration("Claude", []string{"model-x"})
+		SaveIntegration("Claude", []string{"model-x"})
 
-		config, err := loadIntegration("claude")
+		config, err := LoadIntegration("claude")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -134,11 +211,11 @@ func TestIntegrationConfig(t *testing.T) {
 	})
 
 	t.Run("multiple integrations in single file", func(t *testing.T) {
-		saveIntegration("app1", []string{"model-1"})
-		saveIntegration("app2", []string{"model-2"})
+		SaveIntegration("app1", []string{"model-1"})
+		SaveIntegration("app2", []string{"model-2"})
 
-		config1, _ := loadIntegration("app1")
-		config2, _ := loadIntegration("app2")
+		config1, _ := LoadIntegration("app1")
+		config2, _ := LoadIntegration("app2")
 
 		defaultModel1 := ""
 		if len(config1.Models) > 0 {
@@ -172,8 +249,8 @@ func TestListIntegrations(t *testing.T) {
 	})
 
 	t.Run("returns all saved integrations", func(t *testing.T) {
-		saveIntegration("claude", []string{"model-1"})
-		saveIntegration("droid", []string{"model-2"})
+		SaveIntegration("claude", []string{"model-1"})
+		SaveIntegration("droid", []string{"model-2"})
 
 		configs, err := listIntegrations()
 		if err != nil {
@@ -181,64 +258,6 @@ func TestListIntegrations(t *testing.T) {
 		}
 		if len(configs) != 2 {
 			t.Errorf("expected 2 integrations, got %d", len(configs))
-		}
-	})
-}
-
-func TestEditorPaths(t *testing.T) {
-	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
-
-	t.Run("returns empty for claude (no Editor)", func(t *testing.T) {
-		r := integrations["claude"]
-		paths := editorPaths(r)
-		if len(paths) != 0 {
-			t.Errorf("expected no paths for claude, got %v", paths)
-		}
-	})
-
-	t.Run("returns empty for codex (no Editor)", func(t *testing.T) {
-		r := integrations["codex"]
-		paths := editorPaths(r)
-		if len(paths) != 0 {
-			t.Errorf("expected no paths for codex, got %v", paths)
-		}
-	})
-
-	t.Run("returns empty for droid when no config exists", func(t *testing.T) {
-		r := integrations["droid"]
-		paths := editorPaths(r)
-		if len(paths) != 0 {
-			t.Errorf("expected no paths, got %v", paths)
-		}
-	})
-
-	t.Run("returns path for droid when config exists", func(t *testing.T) {
-		settingsDir, _ := os.UserHomeDir()
-		settingsDir = filepath.Join(settingsDir, ".factory")
-		os.MkdirAll(settingsDir, 0o755)
-		os.WriteFile(filepath.Join(settingsDir, "settings.json"), []byte(`{}`), 0o644)
-
-		r := integrations["droid"]
-		paths := editorPaths(r)
-		if len(paths) != 1 {
-			t.Errorf("expected 1 path, got %d", len(paths))
-		}
-	})
-
-	t.Run("returns paths for opencode when configs exist", func(t *testing.T) {
-		home, _ := os.UserHomeDir()
-		configDir := filepath.Join(home, ".config", "opencode")
-		stateDir := filepath.Join(home, ".local", "state", "opencode")
-		os.MkdirAll(configDir, 0o755)
-		os.MkdirAll(stateDir, 0o755)
-		os.WriteFile(filepath.Join(configDir, "opencode.json"), []byte(`{}`), 0o644)
-		os.WriteFile(filepath.Join(stateDir, "model.json"), []byte(`{}`), 0o644)
-
-		r := integrations["opencode"]
-		paths := editorPaths(r)
-		if len(paths) != 2 {
-			t.Errorf("expected 2 paths, got %d: %v", len(paths), paths)
 		}
 	})
 }
@@ -251,7 +270,7 @@ func TestLoadIntegration_CorruptedJSON(t *testing.T) {
 	os.MkdirAll(dir, 0o755)
 	os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{corrupted json`), 0o644)
 
-	_, err := loadIntegration("test")
+	_, err := LoadIntegration("test")
 	if err == nil {
 		t.Error("expected error for nonexistent integration in corrupted file")
 	}
@@ -261,11 +280,11 @@ func TestSaveIntegration_NilModels(t *testing.T) {
 	tmpDir := t.TempDir()
 	setTestHome(t, tmpDir)
 
-	if err := saveIntegration("test", nil); err != nil {
+	if err := SaveIntegration("test", nil); err != nil {
 		t.Fatalf("saveIntegration with nil models failed: %v", err)
 	}
 
-	config, err := loadIntegration("test")
+	config, err := LoadIntegration("test")
 	if err != nil {
 		t.Fatalf("loadIntegration failed: %v", err)
 	}
@@ -281,7 +300,7 @@ func TestSaveIntegration_EmptyAppName(t *testing.T) {
 	tmpDir := t.TempDir()
 	setTestHome(t, tmpDir)
 
-	err := saveIntegration("", []string{"model"})
+	err := SaveIntegration("", []string{"model"})
 	if err == nil {
 		t.Error("expected error for empty app name, got nil")
 	}
@@ -290,11 +309,73 @@ func TestSaveIntegration_EmptyAppName(t *testing.T) {
 	}
 }
 
+func TestSaveIntegrationAutoMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	t.Run("save and load round-trip", func(t *testing.T) {
+		if err := SaveIntegrationAutoMode("claude", true); err != nil {
+			t.Fatal(err)
+		}
+		config, err := LoadIntegration("claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if config.AutoMode == nil || !*config.AutoMode {
+			t.Error("expected auto mode to be enabled")
+		}
+	})
+
+	t.Run("saveIntegration preserves auto mode", func(t *testing.T) {
+		if err := SaveIntegration("claude", []string{"model-a"}); err != nil {
+			t.Fatal(err)
+		}
+		config, err := LoadIntegration("claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if config.AutoMode == nil || !*config.AutoMode {
+			t.Error("expected auto mode to survive a model save")
+		}
+	})
+
+	t.Run("auto mode preserves models", func(t *testing.T) {
+		if err := SaveAliases("claude", map[string]string{"fast": "model-a"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := MarkIntegrationOnboarded("claude"); err != nil {
+			t.Fatal(err)
+		}
+		if err := SaveIntegrationAutoMode("claude", false); err != nil {
+			t.Fatal(err)
+		}
+		config, err := LoadIntegration("claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if config.AutoMode == nil || *config.AutoMode {
+			t.Error("expected auto mode to be disabled")
+		}
+		if len(config.Models) != 1 || config.Models[0] != "model-a" {
+			t.Errorf("expected models to be preserved, got %v", config.Models)
+		}
+		if config.Aliases["fast"] != "model-a" || !config.Onboarded {
+			t.Errorf("expected aliases and onboarding state to be preserved, got %+v", config)
+		}
+	})
+
+	t.Run("empty app name", func(t *testing.T) {
+		if err := SaveIntegrationAutoMode("", true); err == nil {
+			t.Error("expected error for empty app name, got nil")
+		}
+	})
+}
+
 func TestLoadIntegration_NonexistentIntegration(t *testing.T) {
 	tmpDir := t.TempDir()
 	setTestHome(t, tmpDir)
 
-	_, err := loadIntegration("nonexistent")
+	_, err := LoadIntegration("nonexistent")
 	if err == nil {
 		t.Error("expected error for nonexistent integration, got nil")
 	}
@@ -511,7 +592,7 @@ func TestMigrateConfig(t *testing.T) {
 		os.WriteFile(filepath.Join(legacyDir, "config.json"), []byte(`{"integrations":{"claude":{"models":["llama3.2"]}}}`), 0o644)
 
 		// load triggers migration, then save should write to new path
-		if err := saveIntegration("codex", []string{"qwen2.5"}); err != nil {
+		if err := SaveIntegration("codex", []string{"qwen2.5"}); err != nil {
 			t.Fatal(err)
 		}
 
