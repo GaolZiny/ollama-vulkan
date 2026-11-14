@@ -15,6 +15,29 @@
 
 上游 Dockerfile 结构再变时，脚本会直接报错退出，而不是生成一个坏掉的构建。
 
+## 运行（核显 / iGPU）
+
+新版 ollama 默认会**丢弃通过 Vulkan 识别到的核显**（日志里会出现
+`dropping integrated GPU`），必须显式设置 `OLLAMA_IGPU_ENABLE=1`：
+
+```yaml
+services:
+  ollama:
+    image: ghcr.io/<owner>/ollama-vulkan:latest
+    restart: unless-stopped
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      - OLLAMA_IGPU_ENABLE=1      # 核显必须
+      - OLLAMA_KEEP_ALIVE=-1      # 模型常驻，避免空闲 5 分钟后卸载
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama:/root/.ollama
+```
+
+启动后日志里的 `inference compute` 应显示 `library=Vulkan`，而不是 `cpu`。
+
 ## Workflows
 
 | 文件 | 触发 | 作用 |
